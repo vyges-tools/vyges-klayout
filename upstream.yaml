@@ -1,0 +1,26 @@
+# vyges-klayout build pin — the source of truth for what we build.
+#
+# Self-contained: this repo vendors nothing in-tree. CI clones KLayout at
+# `commit` and BUILDS it HEADLESS (Qt-free). A sync workflow bumps `commit` when
+# a new KLayout release tag appears (opening a PR); merging pins a release.
+upstream:
+  source: https://github.com/KLayout/klayout
+  ref: master                                  # KLayout tags releases (v0.30.x); we pin the release commit
+  release_tag: v0.30.9                          # human-facing upstream release this SHA corresponds to
+  commit: 6270877110ef808dd442fd2244164cec06a7b10e   # KLayout v0.30.9 (resolved from refs/tags/v0.30.9)
+  updated_at: "2026-07-11T16:48:39Z"
+
+license:
+  spdx: GPL-3.0-or-later                        # KLayout; shipped with the binary as LICENSE.KLayout + SOURCE_OFFER (GPL-3 §6)
+
+build:
+  base_image: ubuntu:24.04                      # glibc 2.39; LTS; match runtime base (VALIDATED on ovs-intelsdn-2)
+  qt: none                                      # HEADLESS — no Qt, no lay/edt GUI
+  # VALIDATED 2026-07-11 (v0.30.9 on ubuntu:24.04): setup.py builds the Qt-free +
+  # qmake-free module (_db/_tl/_rdb/_pex/_lib/_lym/net_tracer + all streamers).
+  # Build deps: build-essential python3-dev zlib1g-dev libexpat1-dev libpng-dev libcurl4-openssl-dev.
+  targets:
+    python_module: "python3 setup.py build"     # PRIMARY — klayout.db/.tl/.rdb/.pex/.lib; Qt-free AND qmake-free
+    # buddy_tools (strm*) come from `./build.sh -without-qt`, but that path still needs
+    # qmake (KLayout's build tool) even for Qt-less libs. OPTIONAL / deferred — the module
+    # covers headless I/O + DRC/LVS scripting; add qmake to the build env only if we want the CLIs.
