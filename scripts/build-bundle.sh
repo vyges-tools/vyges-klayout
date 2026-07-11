@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# build-bundle.sh — build HEADLESS (Qt-free) KLayout at $KL_COMMIT (inside the
-# deps-env image, where /klayout already exists) and assemble the relocatable
-# bundle + tarball into $OUT_DIR.
+# build-bundle.sh — build HEADLESS (Qt-free) KLayout at $KL_COMMIT and assemble a
+# relocatable tar.gz into $OUT_DIR. THE TAR.GZ IS THE PRODUCT.
 #
-# Binary-first: THIS bundle is the primary artifact; the container
-# (Dockerfile.runtime) wraps the same bytes. Relocatable = real binaries + the
-# Python module + the non-glibc ldd closure + a wrapper that sets LD_LIBRARY_PATH.
-# Host floor: glibc >= 2.39 (the ubuntu:24.04 build base).
+# The Qt-free deliverable is the KLayout Python module (klayout.db/.rdb/.pex/.lib/…)
+# built by setup.py — NO Qt, NO qmake. The built .so's link with RPATH=$ORIGIN, so the
+# pymod tree is relocatable as-is (no wheel step needed). Validated on ubuntu:24.04
+# (v0.30.9): import + GDS round-trip OK, 0 libQt refs, ~80MB (~21MB compressed).
 #
-# GPL boundary: this bundle contains ONLY KLayout (GPL-3) artifacts + its license
-# + a SOURCE_OFFER. The Apache-2.0 gds-view binary is added SEPARATELY afterwards
-# by scripts/attach-gds-view.sh — it is never built or linked here.
+# GPL boundary: this bundle contains ONLY KLayout (GPL-3) + its license + a SOURCE_OFFER.
+# The Apache-2.0 gds-view renderer and any container are composed LATER at the vybox-eda
+# level (which combines vyges-openroad + vyges-klayout + gds-view + loom) — never here.
 #
-# Env: KL_COMMIT (required), VERSION (default "dev"), OUT_DIR (default /out).
+# Env: KL_COMMIT (req), VERSION (default dev), OUT_DIR (default /out),
+#      KL_TREE (default /klayout), PYTHON (default python3).
 set -euo pipefail
-
 : "${KL_COMMIT:?set KL_COMMIT}"
 VERSION="${VERSION:-dev}"
 OUT_DIR="${OUT_DIR:-/out}"
-SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KL_TREE="${KL_TREE:-/klayout}"
+PYTHON="${PYTHON:-python3}"
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$OUT_DIR"
 
 echo "== checkout $KL_COMMIT =="
@@ -27,71 +27,89 @@ cd "$KL_TREE"
 git fetch --depth 1 origin "$KL_COMMIT" 2>/dev/null || git fetch origin
 git checkout -q "$KL_COMMIT"
 
-# VALIDATED 2026-07-11 (v0.30.9, ubuntu:24.04, ovs-intelsdn-2): the Qt-free AND
-# qmake-free deliverable is the KLayout Python module built by setup.py. Build it
-# as a wheel for a clean, relocatable `pip install --target` below. The .so's it
-# produces (_db/_tl/_rdb/_pex/_lib/_lym/net_tracer + all streamers) are self-contained.
-echo "== build Qt-free python module (pip wheel) =="
-python3 -m pip wheel . -w "$OUT_DIR/wheelhouse" --no-deps
+echo "== build Qt-free module (setup.py build) =="
+"$PYTHON" setup.py build
 
-# NOTE: the strm* buddy CLIs come from `./build.sh -without-qt`, but that path still
-# needs qmake (KLayout's build tool) even for Qt-less libs — so it is OPTIONAL here,
-# gated on BUILD_BUDDY=1 + qmake present. The module covers headless I/O + DRC/LVS.
+MP=$(find "$KL_TREE/build" -maxdepth 2 -type d -name klayout -path '*lib*' | head -1)
+[ -n "$MP" ] || { echo "ERROR: built module not found under $KL_TREE/build"; exit 1; }
 
 SHORT=$(echo "$KL_COMMIT" | cut -c1-12)
 NAME="vyges-klayout-${VERSION}-g${SHORT}"
-BUNDLE="$OUT_DIR/$NAME"
-echo "== assemble relocatable bundle: $BUNDLE =="
-rm -rf "$BUNDLE"
-mkdir -p "$BUNDLE"/{bin,pymod}
+B="$OUT_DIR/$NAME"
+echo "== assemble relocatable bundle: $B =="
+rm -rf "$B"; mkdir -p "$B/pymod"
+cp -a "$MP" "$B/pymod/klayout"          # .so's carry RPATH=$ORIGIN → relocatable
 
-# Install the built wheel into pymod/ — relocatable: import via PYTHONPATH=$BUNDLE/pymod
-# (the klayout/*.so extensions are self-contained; no separate ldd closure needed).
-python3 -m pip install --no-deps --no-index --target "$BUNDLE/pymod" \
-  "$OUT_DIR"/wheelhouse/klayout-*.whl
+# Prove no Qt slipped in (headless invariant).
+if find "$B/pymod" -name '*.so' -exec ldd {} \; 2>/dev/null | grep -qi 'libQt'; then
+  echo "ERROR: Qt linkage found in module"; exit 1; fi
 
-# OPTIONAL strm* buddy CLIs — needs qmake (build.sh is qmake-based even for Qt-less libs).
-# Skipped unless BUILD_BUDDY=1 and qmake is present; the module already covers headless
-# GDS/OASIS I/O + DRC/LVS scripting.
-if [ "${BUILD_BUDDY:-0}" = 1 ] && command -v qmake >/dev/null 2>&1; then
-  echo "== (optional) buddy tools via build.sh -without-qt =="
-  mkdir -p "$BUNDLE"/{libexec,lib}
-  ./build.sh -without-qt -noruby -python python3 -libexpat -libpng -libcurl -nolibgit2 \
-    -build "$OUT_DIR/kl-build" -bin "$OUT_DIR/kl-bin" -option -j"$(nproc)" || true
-  for tool in strm2txt strm2oas strm2gds strmxor strmcmp strmrun; do
-    f=$(find "$OUT_DIR/kl-bin" -type f -executable -name "$tool" 2>/dev/null | head -1 || true)
-    [ -n "$f" ] || continue
-    cp "$f" "$BUNDLE/libexec/$tool"
-    printf '#!/bin/sh\nHERE=$(cd "$(dirname "$0")/.." && pwd)\nexport LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\nexec "$HERE/libexec/%s" "$@"\n' "$tool" > "$BUNDLE/bin/$tool"
-    chmod +x "$BUNDLE/bin/$tool"
-  done
-fi
-
-# Ship KLayout's own license (GPL-3 requires it accompany the binary) + a source
-# offer pointing at the exact upstream commit that IS the corresponding source.
+# GPL-3: ship KLayout's license + a corresponding-source offer.
 for lic in LICENSE COPYING LICENSE.txt; do
-  [ -f "$KL_TREE/$lic" ] && cp "$KL_TREE/$lic" "$BUNDLE/LICENSE.KLayout" && break
-done
-cat > "$BUNDLE/SOURCE_OFFER" <<OFFER
-This bundle contains a build of KLayout (GPL-3.0-or-later). The complete
-corresponding source is the KLayout tree at the exact commit below, plus the
-Apache-2.0 build recipe at github.com/vyges-tools/vyges-klayout:
-
-  upstream:  https://github.com/KLayout/klayout
-  commit:    ${KL_COMMIT}
+  [ -f "$KL_TREE/$lic" ] && cp "$KL_TREE/$lic" "$B/LICENSE.KLayout" && break; done
+cat > "$B/SOURCE_OFFER" <<OFFER
+KLayout (GPL-3.0-or-later). The complete corresponding source is the KLayout tree at
+commit ${KL_COMMIT}, plus the Apache-2.0 build recipe at github.com/vyges-tools/vyges-klayout:
 
   git clone https://github.com/KLayout/klayout && git checkout ${KL_COMMIT}
 
-Vyges will also provide the corresponding source on request for three years.
-The KLayout name and trademarks belong to their respective owners; this build is
-unaffiliated. See LICENSE.KLayout for the full license text.
+The KLayout name/trademarks belong to their owners; this build is unaffiliated. See
+LICENSE.KLayout for the full license text.
 OFFER
 
-# Provenance manifest (image_digest + build_date filled by CI post-build;
-# gds_view_version filled by attach-gds-view.sh).
+# Convenience: source env.sh to put the bundled module on PYTHONPATH.
+cat > "$B/env.sh" <<'ENVS'
+# usage: source env.sh   ->   python3 -c 'import klayout.db'
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)
+export PYTHONPATH="$HERE/pymod${PYTHONPATH:+:$PYTHONPATH}"
+ENVS
+
+# A named launcher so `klayout-py script.py` == python3 with the module on PYTHONPATH.
+mkdir -p "$B/bin"
+cat > "$B/bin/klayout-py" <<'LAUNCH'
+#!/bin/sh
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+export PYTHONPATH="$HERE/pymod${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 "$@"
+LAUNCH
+chmod +x "$B/bin/klayout-py"
+
+# MCP-friendliness: a self-describing tool descriptor (the container/bundle analog of a
+# loom engine's --describe) so the vyges resolve/MCP layer can discover + invoke this tool
+# uniformly. Ships in BOTH the tarball and the image; mirrored as com.vyges.tool.* labels.
+cat > "$B/vyges-tool.json" <<TOOLJSON
+{
+  "schema": "vyges-tool-descriptor/1.0",
+  "tool": "klayout",
+  "version": "${VERSION}",
+  "kind": "backing-tool",
+  "headless": true,
+  "provides": ["gds-io", "oasis-io", "lefdef-io", "layout-db", "drc-oracle", "lvs-oracle"],
+  "invoke": { "interpreter": ["python3"], "launcher": "bin/klayout-py",
+              "python_module": "klayout.db", "pythonpath": "pymod" },
+  "env": { "required": ["PDK_ROOT"], "optional": ["PDK", "STD_CELL_LIBRARY"] },
+  "license": "GPL-3.0-or-later",
+  "upstream_commit": "${KL_COMMIT}"
+}
+TOOLJSON
+
+# Copy-paste tools.json wiring for the vyges CLI resolver / MCP layer.
+cat > "$B/tools.json.example" <<'TJ'
+{ "tools": {
+    "klayout": { "container": {
+      "runtime": "docker",
+      "image": "ghcr.io/vyges-tools/vyges-klayout:latest",
+      "entrypoint": "python3"
+    } }
+} }
+TJ
+
 if [ -x "$SCRIPTS_DIR/provenance.sh" ]; then
   KL_COMMIT="$KL_COMMIT" VERSION="$VERSION" KL_TREE="$KL_TREE" \
-    "$SCRIPTS_DIR/provenance.sh" > "$BUNDLE/manifest.json" || true
+    "$SCRIPTS_DIR/provenance.sh" > "$B/manifest.json" || true
 fi
 
-echo "BUILD_BUNDLE_OK short=$SHORT name=$NAME (run attach-gds-view.sh, then tar)"
+echo "== tarball (THE PRODUCT) =="
+tar -C "$OUT_DIR" -czf "$OUT_DIR/${NAME}-linux-x86_64.tar.gz" "$NAME"
+du -sh "$B" "$OUT_DIR/${NAME}-linux-x86_64.tar.gz"
+echo "BUILD_BUNDLE_OK short=$SHORT tarball=${NAME}-linux-x86_64.tar.gz"

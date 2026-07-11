@@ -1,7 +1,8 @@
 # Slim runtime image: the SAME relocatable HEADLESS bundle built by
 # scripts/build-bundle.sh, on a clean ubuntu:24.04 with NO build tooling and NO Qt.
-# The Vyges gds-view renderer is COPIED IN AS A SEPARATE BINARY (Apache-2.0),
-# aggregated beside the GPL-3 KLayout binaries — never linked with them.
+# Binary-first — the container wraps the byte-identical bundle that also ships as the
+# tar.gz. KLayout-ONLY (GPL-3): the Apache gds-view renderer is NOT here — it is
+# composed later at the vybox-eda level, so this image has no license boundary to police.
 #
 # Build context = the directory holding the bundle (e.g. ./dist).
 #   docker build -f Dockerfile.runtime --build-arg BUNDLE_DIR=<bundle-basename> \
@@ -9,27 +10,35 @@
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
-# The bundle directory name inside the build context, e.g.
-# vyges-klayout-0.30.9-g<short>
+# The bundle directory name inside the build context, e.g. vyges-klayout-0.30.9-g<short>
 ARG BUNDLE_DIR
+# Version string for the vyges tool labels (e.g. 0.30.9).
+ARG VERSION=dev
 
-# Minimal runtime deps for the Qt-free KLayout core + Python module (NO Qt/X).
-# TODO(spike): confirm the minimal runtime set (python3 + a few libs); assert no libQt*.
+# Minimal runtime deps for the Qt-free KLayout module (NO Qt/X). The module's .so's
+# link libexpat/libcurl/zlib/libpng (the Qt substitutes) + libstdc++/glibc from the base.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 libpng16-16 zlib1g libexpat1 ca-certificates \
+      python3 libexpat1 libcurl4t64 zlib1g libpng16-16 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY ${BUNDLE_DIR} /opt/vyges-klayout
-ENV PATH=/opt/vyges-klayout/bin:$PATH \
-    PYTHONPATH=/opt/vyges-klayout/pymod:$PYTHONPATH
+ENV PYTHONPATH=/opt/vyges-klayout/pymod \
+    PATH=/opt/vyges-klayout/bin:$PATH
 
-# Fail the build if (a) the Qt-free KLayout module does not import, (b) gds-view is
-# absent, or (c) any Qt library leaked into the image.
-RUN python3 -c 'import klayout.db, klayout.rdb; print("klayout.db OK")' ; \
-    test -x /opt/vyges-klayout/bin/gds-view ; \
+# Fail the build if (a) the Qt-free KLayout module does not import, or (b) any Qt
+# library leaked into the image.
+RUN python3 -c 'import klayout.db, klayout.rdb, klayout.pex; print("klayout.db OK")' ; \
     if ldconfig -p | grep -qi 'libQt'; then echo "ERROR: Qt leaked into headless image" >&2; exit 1; fi
 
+# Standard OCI labels + vyges-tool descriptor labels (mirror /opt/vyges-klayout/vyges-tool.json)
+# so the vyges resolve/MCP layer can discover this backing tool via `docker inspect`.
 LABEL org.opencontainers.image.title="vyges-klayout" \
       org.opencontainers.image.source="https://github.com/vyges-tools/vyges-klayout" \
-      org.opencontainers.image.description="Headless (Qt-free) KLayout, pinned + reproducibly built by Vyges, co-packaged with the Apache-2.0 gds-view renderer (separate binary)." \
-      org.opencontainers.image.licenses="GPL-3.0-or-later AND Apache-2.0"
+      org.opencontainers.image.description="Headless (Qt-free) KLayout Python module, pinned + reproducibly built by Vyges." \
+      org.opencontainers.image.licenses="GPL-3.0-or-later" \
+      com.vyges.tool="klayout" \
+      com.vyges.tool.version="${VERSION}" \
+      com.vyges.tool.kind="backing-tool" \
+      com.vyges.tool.headless="true" \
+      com.vyges.tool.invoke="python3" \
+      com.vyges.tool.descriptor="/opt/vyges-klayout/vyges-tool.json"

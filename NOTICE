@@ -6,11 +6,7 @@ Version 2.0 (see LICENSE). It produces reproducible, HEADLESS (Qt-free) builds o
 KLayout (https://github.com/KLayout/klayout), which is licensed under
 GPL-3.0-or-later and is not affiliated with Vyges.
 
-Each built artifact ships KLayout's own license as LICENSE.KLayout together with a
-per-build NOTICE, a SOURCE_OFFER (the exact upstream commit that is the
-corresponding source, per GPL-3 §6), and manifest.json recording the upstream
-commit and provenance.
-
-The Vyges gds-view renderer co-packaged in the runtime image is a SEPARATE
-Apache-2.0 binary (© Vyges); it is aggregated beside the GPL KLayout binary and is
-NOT linked with, and forms no combined work with, any KLayout GPL library.
+The build products (a relocatable tar.gz and a container image) contain the
+KLayout Python module only. Each ships KLayout's own license as LICENSE.KLayout
+together with a SOURCE_OFFER (the exact upstream commit that is the corresponding
+source, per GPL-3 §6) and a manifest.json recording the upstream commit.

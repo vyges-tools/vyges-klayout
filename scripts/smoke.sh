@@ -1,24 +1,21 @@
 #!/usr/bin/env bash
-# smoke.sh — prove a built artifact runs HEADLESS. Accepts a bundle directory OR a
+# smoke.sh — prove a built artifact works HEADLESS. Accepts a bundle directory OR a
 # docker image ref. For a bundle it runs from a FRESH path to prove relocation.
-# Checks: (1) a KLayout buddy tool runs, (2) gds-view renders a GDS -> SVG,
-# (3) NO Qt leaked in. Usage: scripts/smoke.sh <bundle-dir>|<docker-image>
+# Checks: (1) klayout.db imports + a GDS write->read round-trip, (2) NO Qt linkage.
+# Usage: scripts/smoke.sh <bundle-dir>|<docker-image>
 set -euo pipefail
 TARGET="${1:?usage: smoke.sh <bundle-dir>|<docker-image>}"
 
-run() {  # run a command either in the bundle path or the image
-  if [ -d "$1" ]; then shift; "$@"; else img="$1"; shift; docker run --rm "$img" "$@"; fi
-}
+RT='import klayout.db as db; ly=db.Layout(); c=ly.create_cell("T"); c.shapes(ly.layer(1,0)).insert(db.Box(0,0,100,100)); ly.write("/tmp/kl_smoke.gds"); ly2=db.Layout(); ly2.read("/tmp/kl_smoke.gds"); print("round-trip OK, klayout", db.__version__)'
 
 if [ -d "$TARGET" ]; then
-  tmp=$(mktemp -d); cp -a "$TARGET" "$tmp/bundle"; B="$tmp/bundle"
-  PYTHONPATH="$B/pymod" python3 -c 'import klayout.db, klayout.rdb; print("klayout.db OK")'
-  "$B/bin/gds-view" --version >/dev/null 2>&1 && echo "gds-view OK"
-  if find "$B/pymod" -name '*.so' -exec ldd {} \; 2>/dev/null | grep -qi 'libQt'; then
-    echo "ERROR: Qt linkage in module" >&2; exit 1; else echo "no-Qt OK"; fi
-  rm -rf "$tmp"
+  tmp=$(mktemp -d); cp -a "$TARGET" "$tmp/b"
+  PYTHONPATH="$tmp/b/pymod" python3 -c "$RT"
+  if find "$tmp/b/pymod" -name '*.so' -exec ldd {} \; 2>/dev/null | grep -qi 'libQt'; then
+    echo "ERROR: Qt linkage in module" >&2; rm -rf "$tmp"; exit 1; fi
+  echo "no-Qt OK"; rm -rf "$tmp"
 else
-  docker run --rm -e PYTHONPATH=/opt/vyges-klayout/pymod "$TARGET" sh -lc \
-    'python3 -c "import klayout.db, klayout.rdb; print(\"klayout.db OK\")"; gds-view --version >/dev/null 2>&1 && echo "gds-view OK"; if ldconfig -p | grep -qi libQt; then echo "ERROR: Qt"; exit 1; else echo "no-Qt OK"; fi'
+  docker run --rm "$TARGET" python3 -c "$RT"
+  docker run --rm "$TARGET" sh -c 'if ldconfig -p | grep -qi libQt; then echo "ERROR: Qt"; exit 1; else echo "no-Qt OK"; fi'
 fi
 echo "SMOKE_OK"
