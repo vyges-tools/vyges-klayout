@@ -16,7 +16,7 @@ ARG KL_COMMIT
 # (qmake/ruby would only be needed for the OPTIONAL strm* buddy CLIs — not built here.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates build-essential \
-      python3 python3-dev python3-pip python3-venv python3-wheel \
+      python3 python3-dev python3-pip python3-venv python3-wheel python3-tomli \
       zlib1g-dev libexpat1-dev libcurl4-openssl-dev libpng-dev \
     && rm -rf /var/lib/apt/lists/*
 
