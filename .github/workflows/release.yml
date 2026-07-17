@@ -1,8 +1,9 @@
 name: release
 
-# Build the headless (Qt-free) KLayout bundle at the pinned commit and publish BOTH
-# artifacts: a relocatable tar.gz (GitHub Release) and a slim container (ghcr.io).
-# Free on a public repo. Steps mirror the validated manual build (ubuntu:24.04).
+# Build the headless (Qt-free) KLayout bundle at the pinned commit and publish
+# MULTI-ARCH artifacts: relocatable tar.gz per arch (GitHub Release) and a
+# multi-arch container manifest (ghcr.io). Native runners (amd64 + arm64) — free
+# on a public repo, no QEMU. Verified by multiarch-check.yml (2026-07-17).
 
 on:
   workflow_dispatch:
@@ -15,9 +16,24 @@ permissions:
   contents: write   # create the GitHub Release
   packages: write   # push to ghcr.io
 
+env:
+  IMG: ghcr.io/vyges-tools/vyges-klayout
+
 jobs:
+  # ---- per-arch build: bundle + tarball + per-arch container tag ----
   build:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            docker_arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            docker_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    name: build-${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +44,6 @@ jobs:
             | sed -E 's/.*commit:[[:space:]]*//; s/[[:space:]]*#.*//; s/"//g')
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           echo "short=${COMMIT:0:12}" >> "$GITHUB_OUTPUT"
-          echo "Pinned commit: $COMMIT"
 
       - name: Install Qt-free build deps
         run: |
@@ -42,7 +57,7 @@ jobs:
           git clone https://github.com/KLayout/klayout.git /tmp/klayout
           git -C /tmp/klayout checkout "${{ steps.pin.outputs.commit }}"
 
-      - name: Build bundle + tarball
+      - name: Build bundle + tarball (arch from uname -m)
         env:
           KL_COMMIT: ${{ steps.pin.outputs.commit }}
           VERSION: ${{ inputs.version }}
@@ -53,6 +68,12 @@ jobs:
       - name: Smoke (tarball bundle)
         run: bash scripts/smoke.sh "dist/vyges-klayout-${{ inputs.version }}-g${{ steps.pin.outputs.short }}"
 
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.arch }}
+          path: dist/*.tar.gz
+
       - name: Log in to ghcr.io
         uses: docker/login-action@v3
         with:
@@ -60,29 +81,68 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build, smoke + push container
+      - name: Build, smoke + push per-arch image
+        env:
+          VERSION: ${{ inputs.version }}
+          SHORT: ${{ steps.pin.outputs.short }}
+          DA: ${{ matrix.docker_arch }}
+        run: |
+          docker build -f Dockerfile.runtime \
+            --build-arg BUNDLE_DIR="vyges-klayout-${VERSION}-g${SHORT}" \
+            --build-arg VERSION="${VERSION}" \
+            -t "$IMG:sha-${SHORT}-${DA}" dist
+          bash scripts/smoke.sh "$IMG:sha-${SHORT}-${DA}"
+          docker push "$IMG:sha-${SHORT}-${DA}"
+
+  # ---- combine per-arch images into multi-arch manifests + publish the release ----
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pin (short)
+        id: pin
+        run: |
+          COMMIT=$(grep -E '^[[:space:]]*commit:' upstream.yaml | head -1 \
+            | sed -E 's/.*commit:[[:space:]]*//; s/[[:space:]]*#.*//; s/"//g')
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "short=${COMMIT:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Collect both tarballs
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: tarball-*
+          merge-multiple: true
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifests (amd64 + arm64)
         env:
           VERSION: ${{ inputs.version }}
           SHORT: ${{ steps.pin.outputs.short }}
         run: |
-          IMG=ghcr.io/vyges-tools/vyges-klayout
-          docker build -f Dockerfile.runtime \
-            --build-arg BUNDLE_DIR="vyges-klayout-${VERSION}-g${SHORT}" \
-            --build-arg VERSION="${VERSION}" \
-            -t "$IMG:sha-${SHORT}" -t "$IMG:${VERSION}" -t "$IMG:latest" dist
-          bash scripts/smoke.sh "$IMG:${VERSION}"
-          docker push "$IMG:sha-${SHORT}"
-          docker push "$IMG:${VERSION}"
-          docker push "$IMG:latest"
+          for TAG in "sha-${SHORT}" "${VERSION}" latest; do
+            docker buildx imagetools create -t "$IMG:${TAG}" \
+              "$IMG:sha-${SHORT}-amd64" "$IMG:sha-${SHORT}-arm64"
+          done
+          docker buildx imagetools inspect "$IMG:${VERSION}"
 
-      - name: Publish GitHub Release (tarball)
+      - name: Publish GitHub Release (both-arch tarballs)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ inputs.version }}
           name: vyges-klayout ${{ inputs.version }}
           body: |
             Headless (Qt-free) KLayout ${{ inputs.version }} (pinned upstream commit ${{ steps.pin.outputs.commit }}).
-            - Tarball: relocatable `pymod/` — `source env.sh` then `import klayout.db`.
-            - Image: `ghcr.io/vyges-tools/vyges-klayout:${{ inputs.version }}`.
+            **Multi-arch: linux/amd64 + linux/arm64** (native builds).
+            - Tarballs: `…-linux-x86_64.tar.gz` and `…-linux-aarch64.tar.gz` — `source env.sh` then `import klayout.db`.
+            - Image: `ghcr.io/vyges-tools/vyges-klayout:${{ inputs.version }}` (multi-arch manifest).
             GPL-3.0-or-later (see LICENSE.KLayout + SOURCE_OFFER in the bundle).
           files: dist/*.tar.gz
