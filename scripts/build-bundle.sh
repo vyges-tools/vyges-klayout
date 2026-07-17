@@ -110,6 +110,10 @@ if [ -x "$SCRIPTS_DIR/provenance.sh" ]; then
 fi
 
 echo "== tarball (THE PRODUCT) =="
-tar -C "$OUT_DIR" -czf "$OUT_DIR/${NAME}-linux-x86_64.tar.gz" "$NAME"
-du -sh "$B" "$OUT_DIR/${NAME}-linux-x86_64.tar.gz"
-echo "BUILD_BUNDLE_OK short=$SHORT tarball=${NAME}-linux-x86_64.tar.gz"
+# Arch from the build host (x86_64 or aarch64) — NOT hardcoded, so the same recipe
+# produces correctly-labelled bundles on amd64 and arm64 runners.
+ARCH="$(uname -m)"
+TARBALL="${NAME}-linux-${ARCH}.tar.gz"
+tar -C "$OUT_DIR" -czf "$OUT_DIR/${TARBALL}" "$NAME"
+du -sh "$B" "$OUT_DIR/${TARBALL}"
+echo "BUILD_BUNDLE_OK short=$SHORT arch=$ARCH tarball=${TARBALL}"
