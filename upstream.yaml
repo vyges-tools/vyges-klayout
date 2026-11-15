@@ -14,7 +14,7 @@ license:
   spdx: GPL-3.0-or-later                        # KLayout; shipped with the binary as LICENSE.KLayout + SOURCE_OFFER (GPL-3 §6)
 
 build:
-  base_image: ubuntu:24.04                      # glibc 2.39; LTS; match runtime base (VALIDATED on ovs-intelsdn-2)
+  base_image: ubuntu:24.04                      # glibc 2.39; LTS; match runtime base (VALIDATED on the build host)
   qt: none                                      # HEADLESS — no Qt, no lay/edt GUI
   # VALIDATED 2026-07-11 (v0.30.9 on ubuntu:24.04): setup.py builds the Qt-free +
   # qmake-free module (_db/_tl/_rdb/_pex/_lib/_lym/net_tracer + all streamers).
